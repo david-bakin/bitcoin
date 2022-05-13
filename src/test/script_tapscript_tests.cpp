@@ -865,11 +865,44 @@ static const std::vector<SchnorrTriplet> SCHNORR_TRIPLETS = {
 
 }
 
-BOOST_AUTO_TEST_CASE(validate_schnoor_testdata)
+BOOST_AUTO_TEST_CASE(validate_schnorr_testdata)
 {
     for (const auto& triplet : SCHNORR_TRIPLETS) {
         BOOST_TEST(XOnlyPubKey(triplet.pubkey).VerifySchnorr(triplet.sighash, triplet.sig));
     }
+}
+
+BOOST_AUTO_TEST_CASE(validate_schnorr_signature)
+{
+    // Defeat, for test purposes, the protected access of
+    // `GenericTransactionSignatureChecker::VerifySchnorrSignature`
+    struct UnprotectedTransactionsSignatureChecker : public MutableTransactionSignatureChecker
+    {
+        using MutableTransactionSignatureChecker::MutableTransactionSignatureChecker;
+        using MutableTransactionSignatureChecker::VerifySchnorrSignature;
+    };
+    UnprotectedTransactionsSignatureChecker sut{nullptr, 0, {}, {}};
+
+    // Positive tests: triplets which verify
+    for (const auto& triplet : SCHNORR_TRIPLETS) {
+        BOOST_TEST(sut.VerifySchnorrSignature(triplet.sig,
+                                              XOnlyPubKey{triplet.pubkey},
+                                              triplet.sighash));
+    }
+
+    // Negative tests: triplets which fail to verify (get these failing triplets
+    // by modifying a valid triplet, one field at a time)
+    auto diddle_front_byte = [](auto v) { v[0]++; return v; };
+    auto& triplet = SCHNORR_TRIPLETS[0];
+    BOOST_TEST(!sut.VerifySchnorrSignature(diddle_front_byte(triplet.sig),
+                                           XOnlyPubKey{triplet.pubkey},
+                                           triplet.sighash));
+    BOOST_TEST(!sut.VerifySchnorrSignature(triplet.sig,
+                                           XOnlyPubKey{diddle_front_byte(triplet.pubkey)},
+                                           triplet.sighash));
+    BOOST_TEST(!sut.VerifySchnorrSignature(triplet.sig,
+                                           XOnlyPubKey{triplet.pubkey},
+                                           uint256::ONE));
 }
 
 
