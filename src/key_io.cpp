@@ -12,6 +12,8 @@
 #include <assert.h>
 #include <string.h>
 
+#include <special.h>
+
 /// Maximum witness length for Bech32 addresses.
 static constexpr std::size_t BECH32_WITNESS_PROG_MAX_LEN = 40;
 
@@ -28,7 +30,11 @@ public:
     {
         std::vector<unsigned char> data = m_params.Base58Prefix(CChainParams::PUBKEY_ADDRESS);
         data.insert(data.end(), id.begin(), id.end());
-        return EncodeBase58Check(data);
+        DSBOUT("DestinationEncoder - base58prefix " << HexStr(m_params.Base58Prefix(CChainParams::PUBKEY_ADDRESS))
+                 << ", -> data " << HexStr(data));
+        auto r = EncodeBase58Check(data);
+        DSBOUT("DestinationEncoder - returning with checksum " << r);
+        return r;
     }
 
     std::string operator()(const ScriptHash& id) const
@@ -78,6 +84,8 @@ public:
 
 CTxDestination DecodeDestination(const std::string& str, const CChainParams& params, std::string& error_str, std::vector<int>* error_locations)
 {
+    using namespace std;
+
     std::vector<unsigned char> data;
     uint160 hash;
     error_str = "";
@@ -85,13 +93,18 @@ CTxDestination DecodeDestination(const std::string& str, const CChainParams& par
     // Note this will be false if it is a valid Bech32 address for a different network
     bool is_bech32 = (ToLower(str.substr(0, params.Bech32HRP().size())) == params.Bech32HRP());
 
+    DSBOUT("DecodeDestination(" << str << ") - is_bech32? " << boolalpha << is_bech32);
+
     if (!is_bech32 && DecodeBase58Check(str, data, 21)) {
+        DSBOUT("DecodeDestination - !bech32, base58 w/checksum");
         // base58-encoded Bitcoin addresses.
         // Public-key-hash-addresses have version 0 (or 111 testnet).
         // The data vector contains RIPEMD160(SHA256(pubkey)), where pubkey is the serialized public key.
         const std::vector<unsigned char>& pubkey_prefix = params.Base58Prefix(CChainParams::PUBKEY_ADDRESS);
+        DSBOUT("DecodeDestination - pubkey_prefix " << HexStr(pubkey_prefix));
         if (data.size() == hash.size() + pubkey_prefix.size() && std::equal(pubkey_prefix.begin(), pubkey_prefix.end(), data.begin())) {
             std::copy(data.begin() + pubkey_prefix.size(), data.end(), hash.begin());
+            DSBOUT("DecodeDestination - is PKHash, data " << HexStr(data) << ", creating PKHash with uint160 " << hash.ToString());
             return PKHash(hash);
         }
         // Script-hash-addresses have version 5 (or 196 testnet).
@@ -99,6 +112,7 @@ CTxDestination DecodeDestination(const std::string& str, const CChainParams& par
         const std::vector<unsigned char>& script_prefix = params.Base58Prefix(CChainParams::SCRIPT_ADDRESS);
         if (data.size() == hash.size() + script_prefix.size() && std::equal(script_prefix.begin(), script_prefix.end(), data.begin())) {
             std::copy(data.begin() + script_prefix.size(), data.end(), hash.begin());
+            DSBOUT("DecodeDestination - is ScriptHash");
             return ScriptHash(hash);
         }
 
@@ -113,6 +127,7 @@ CTxDestination DecodeDestination(const std::string& str, const CChainParams& par
         }
         return CNoDestination();
     } else if (!is_bech32) {
+        DSBOUT("DecodeDestination - !bech32, maybe base58 w/o checksum");
         // Try Base58 decoding without the checksum, using a much larger max length
         if (!DecodeBase58(str, data, 100)) {
             error_str = "Not a valid Bech32 or Base58 encoding";
@@ -275,7 +290,10 @@ std::string EncodeExtKey(const CExtKey& key)
 
 std::string EncodeDestination(const CTxDestination& dest)
 {
-    return std::visit(DestinationEncoder(Params()), dest);
+    DSBOUT("EncodeDestination - type index " << dest.index());
+    auto r = std::visit(DestinationEncoder(Params()), dest);
+    DSBOUT("EncodeDestination - returns " << r);
+    return r;
 }
 
 CTxDestination DecodeDestination(const std::string& str, std::string& error_msg, std::vector<int>* error_locations)

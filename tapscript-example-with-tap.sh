@@ -17,6 +17,25 @@
 #    (which is a fork of `https://github.com/bitcoin-core/btcdeb` that adds the ability to have full
 #    `tap` logging even though directed to a pipe)
 
+
+sha256() {
+    echo -n ${1} | openssl dgst -sha256 -binary | xxd -p -c 256
+}
+
+ripemd160() {
+    echo -n ${1} | openssl dgst -rmd160 -binary | xxd -p -c 256
+}
+
+hash160() {
+    echo -n "$(ripemd160 $(sha256 ${1}))"
+}
+
+reversehexbytes() {
+    local bin=${1}
+    local bout="$(echo ${bin} | fold -w2 | tac | tr -d '\n')"
+    echo -n ${bout}
+}
+
 # Some housekeeping
 if [ -t 1 ]; then
    RED="$(tput setaf 196)❌ ❌ ❌   "
@@ -89,16 +108,17 @@ preimage_sha256=6c60f404f8167a38fc70eaf8aa17ac351023bef86bcb9d1086a19afe95bd5333
 script_alice="[144 OP_CHECKSEQUENCEVERIFY OP_DROP ${alice_pubkey} OP_CHECKSIG ]"
 script_bob="[OP_SHA256 ${preimage_sha256} OP_EQUALVERIFY ${bob_pubkey} OP_CHECKSIG ]"
 
-echo privkey '(alice)     ' ${alice_privkey}
-echo pubkey '(alice)      ' ${alice_pubkey}
-echo script_alice '       ' ${script_alice}
-echo privkey '(bob)       ' ${bob_privkey}
-echo pubkey '(bob)        ' ${bob_pubkey}
-echo script_bob '         ' ${script_bob}
-echo privkey '(internal)  ' ${privkey} " ($(color ITAL random number to unlock this Taproot transaction))"
-echo pubkey '(internal)   ' ${pubkey}
-echo preimage '           ' ${preimage} " ($(color ITAL random number used as unlock secret for Bob\'s script))"
-echo preimage_sha256 '    ' ${preimage_sha256}
+echo privkey '(alice)        ' ${alice_privkey}
+echo pubkey '(alice)         ' ${alice_pubkey}
+echo script_alice '          ' ${script_alice}
+echo privkey '(bob)          ' ${bob_privkey}
+echo pubkey '(bob)           ' ${bob_pubkey}
+echo script_bob '            ' ${script_bob}
+echo privkey '(internal)     ' ${privkey} " ($(color ITAL random number to unlock this Taproot transaction))"
+echo pubkey '(internal)      ' ${pubkey}
+echo "HASH160(pubkey int)" '   ' $(hash160 ${pubkey})
+echo preimage '              ' ${preimage} " ($(color ITAL random number used as unlock secret for Bob\'s script))"
+echo preimage_sha256 '       ' ${preimage_sha256}
 echo
 
 # GENERATING A TAPROOT COMMITMENT
@@ -125,20 +145,21 @@ else
 fi
 send_to_addr=$(        echo ${tap_send} | grep -P -o '(?<=Resulting Bech32m address: )[[:alnum:]]+')
 
-echo int_pubkey '          ' ${int_pubkey}
-echo script0 '             ' ${script0}
-echo script1 '             ' ${script1}
-echo script0_leafhash '    ' ${script0_leafhash}
-echo script1_leafhash '    ' ${script1_leafhash}
-echo branch01 '            ' ${branch01}
-echo tweak_value '         ' ${tweak_value}
-echo tweaked_pubkey '      ' ${tweaked_pubkey}
+echo int_pubkey '              ' ${int_pubkey}
+echo script0 '                 ' ${script0}
+echo script1 '                 ' ${script1}
+echo script0_leafhash '        ' ${script0_leafhash}
+echo script1_leafhash '        ' ${script1_leafhash}
+echo branch01 '                ' ${branch01}
+echo tweak_value '             ' ${tweak_value}
+echo tweaked_pubkey '          ' ${tweaked_pubkey}
 if [[ ${tweaked_pubkey_parity} -eq 0 ]]; then
-    echo tweaked_pubkey_parity 'even'
+    echo tweaked_pubkey_parity '    even'
 else
-    echo tweaked_pubkey_parity 'odd'
+    echo tweaked_pubkey_parity '    odd'
 fi
-echo send_to_addr '        ' ${send_to_addr}
+echo "HASH160(tweaked_pubkey)" ' ' $(hash160 ${tweaked_pubkey})
+echo send_to_addr '            ' ${send_to_addr}
 echo
 
 ## rename some values for convenience during the Tapscript spend
@@ -182,13 +203,27 @@ if [[ ${witnessprogram} != "1 ${tweaked_pubkey}" ]]; then echo "$(color RED witn
 printf "$(color GREEN create a raw spending transaction for some of the funds)\n"
 
 amount_to_spend="0.0025"
-spend_address=$(btc-cli getnewaddress)
+spend_address=$(btc-cli getnewaddress '' legacy)
+#--
+btc-cli getaddressinfo ${spend_address}
+#--
+spend_address_info_json=$(btc-cli getaddressinfo ${spend_address})
+spend_address_pubkey=$(echo ${spend_address_info_json} | jq -r '.["pubkey"]')
+spend_address_script_pubkey=$(echo ${spend_address_info_json} | jq -r '.["scriptPubKey"]')
+
 spend_tx=$(btc-cli createrawtransaction '[{"txid":"'${txinid}'", "vout":'${vout_index}'}]' '[{"'${spend_address}'":'${amount_to_spend}'}]')
 spend_tx_json=$(btc-cli decoderawtransaction ${spend_tx})
 
-echo amount_to_spend ' ' ${amount_to_spend}
-echo spend_address '   ' ${spend_address}
-echo spend_tx '        ' ${spend_tx}
+printf "spend_address info $(echo ${spend_address_info_json} | jq '.')\n"
+echo
+
+echo amount_to_spend '               ' ${amount_to_spend}
+echo spend_address '                 ' ${spend_address}
+echo spend_address_pubkey '          ' ${spend_address_pubkey}
+echo "HASH160(spend_address_pubkey)" ' ' $(hash160 ${spend_address_pubkey})
+echo spend_address_script_pubkey '   ' ${spend_address_script_pubkey}
+echo "HASH160(...script_pubkey)    " ' ' $(hash160 ${spend_address_script_pubkey})
+echo spend_tx '                      ' ${spend_tx}
 echo
 printf "spend_tx $(echo ${spend_tx_json} | jq '.')\n"
 echo
@@ -218,36 +253,43 @@ fi
 sighash_directspend=$(         echo ${tap_directspend} | grep -P -o '(?<=sighash: )[[:alnum:]]+')
 sig_directspend=$(             echo ${tap_directspend} | grep -P -o '(?<=signature: )[[:alnum:]]+')
 txraw_directspend=$(           echo ${tap_directspend} | grep -P -o '(?<=Resulting transaction: )[[:alnum:]]+')
+txraw_directspend_json=$(btc-cli decoderawtransaction ${txraw_directspend})
+witnessprogram_directspend=$(  echo ${txraw_directspend_json} | jq -r '.["vout"] | .[0] | .["scriptPubKey"] | .["asm"]' | cut -b 3-)
 
-echo type_directspend '                 ' ${type_directspend}
-echo tweaked_pubkey_directspend '       ' ${tweaked_pubkey_directspend}
+echo type_directspend '                    ' ${type_directspend}
+echo tweaked_pubkey_directspend '          ' ${tweaked_pubkey_directspend}
 if [[ ${tweaked_pubkey_parity_directspend} -eq 0 ]]; then
-    echo tweaked_pubkey_parity_directspend  ' even'
+    echo tweaked_pubkey_parity_directspend  '    even'
 else
-    echo tweaked_pubkey_parity_directspend  ' odd'
+    echo tweaked_pubkey_parity_directspend  '    odd'
 fi
-echo tweaked_privkey_directspend '      ' ${tweaked_privkey_directspend}
+echo HASH160\(tweaked_pubkey_directspend\) ' ' $(hash160 ${tweaked_pubkey_directspend})
+echo tweaked_privkey_directspend '         ' ${tweaked_privkey_directspend}
 if [[ ${tweaked_privkey_parity_directspend} -eq 0 ]]; then
-    echo tweaked_privkey_parity_directspend 'even'
+    echo tweaked_privkey_parity_directspend '   even'
 else
-    echo tweaked_privkey_parity_directspend 'odd'
+    echo tweaked_privkey_parity_directspend '   odd'
 fi
-echo sig_directspend '                  ' ${sig_directspend}
-echo txraw_directspend '                ' ${txraw_directspend}
+echo witnessprogram_directspend '          ' ${witnessprogram_directspend}
+echo sig_directspend '                     ' ${sig_directspend}
+echo txraw_directspend '                   ' ${txraw_directspend}
 echo
 
-echo txraw_directspend decoded:
-btc-cli decoderawtransaction ${txraw_directspend}
+printf "txraw_directspend decoded: $(echo ${txraw_directspend_json} | jq '.')\n"
 echo
 
-return
 
 ## see if that signed transaction would be accepted for the mempool
-echo test acceptance via \`testmempoolaccept\`:
+printf "$(color GREEN test acceptance via \`testmempoolaccept\`:)\n"
 testaccept_directspend=$(btc-cli testmempoolaccept '["'${txraw_directspend}'"]')
 accepted_directspend=$(echo ${testaccept_directspend} | jq '.[0] | .["allowed"]')
 echo accepted_directspend? ' ' ${accepted_directspend}
 echo
+
+printf "testaccept_directspend: $(echo ${testaccept_directspend} | jq '.')\n"
+echo
+
+return
 
 # SIGN (SAME) TRANSACTION AS A TAPSCRIPT SPEND OF BOB'S OUTPUT (WITH BOB'S PRIVATE KEY BUT NOT (INTERNAL) PRIVATE KEY)
 

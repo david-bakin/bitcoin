@@ -14,6 +14,8 @@
 
 #include <string>
 
+#include <special.h>
+
 typedef std::vector<unsigned char> valtype;
 
 bool fAcceptDatacarrier = DEFAULT_ACCEPT_DATACARRIER;
@@ -25,14 +27,24 @@ CScriptID::CScriptID(const ScriptHash& in) : BaseHash(static_cast<uint160>(in)) 
 ScriptHash::ScriptHash(const CScript& in) : BaseHash(Hash160(in)) {}
 ScriptHash::ScriptHash(const CScriptID& in) : BaseHash(static_cast<uint160>(in)) {}
 
-PKHash::PKHash(const CPubKey& pubkey) : BaseHash(pubkey.GetID()) {}
-PKHash::PKHash(const CKeyID& pubkey_id) : BaseHash(pubkey_id) {}
+PKHash::PKHash(const uint160& hash) : BaseHash(hash) {
+    DSBOUT("PKHash::PKHash(uint160 " << hash.GetHex() << ")");
+}
+PKHash::PKHash(const CPubKey& pubkey) : BaseHash(pubkey.GetID()) {
+
+    std::vector pk(pubkey.begin(), pubkey.end());
+    DSBOUT("PKHash::PKHash(CPubKey " << HexStr(pk) << ") - ID: " << pubkey.GetID().GetHex());
+}
+PKHash::PKHash(const CKeyID& pubkey_id) : BaseHash(pubkey_id) {
+    DSBOUT("PKHash::PKHash(CKeyID " << pubkey_id.GetHex() << ")");
+}
 
 WitnessV0KeyHash::WitnessV0KeyHash(const CPubKey& pubkey) : BaseHash(pubkey.GetID()) {}
 WitnessV0KeyHash::WitnessV0KeyHash(const PKHash& pubkey_hash) : BaseHash(static_cast<uint160>(pubkey_hash)) {}
 
 CKeyID ToKeyID(const PKHash& key_hash)
 {
+    DSBOUT("ToKeyID(PKHash " << static_cast<BaseHash<uint160>>(key_hash).ToString() << ")");
     return CKeyID{static_cast<uint160>(key_hash)};
 }
 
@@ -304,11 +316,15 @@ public:
 
     CScript operator()(const PKHash& keyID) const
     {
+        using namespace std;
+        DSBOUT("CScriptVisitor::operator()(PKHash " << HexStr(ToByteVector(keyID)) << ")");
         return CScript() << OP_DUP << OP_HASH160 << ToByteVector(keyID) << OP_EQUALVERIFY << OP_CHECKSIG;
     }
 
     CScript operator()(const ScriptHash& scriptID) const
     {
+        using namespace std;
+        DSBOUT("CScriptVisitor::operator()(ScriptHash " << HexStr(ToByteVector(scriptID)) << ")");
         return CScript() << OP_HASH160 << ToByteVector(scriptID) << OP_EQUAL;
     }
 

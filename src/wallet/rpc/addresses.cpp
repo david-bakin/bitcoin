@@ -13,6 +13,8 @@
 
 #include <univalue.h>
 
+#include <special.h>
+
 namespace wallet {
 RPCHelpMan getnewaddress()
 {
@@ -433,6 +435,7 @@ public:
 
     UniValue operator()(const PKHash& pkhash) const
     {
+        DSBOUT("DescribeWalletAddressVisitor(PKHash " << pkhash.ToString() << ")");
         CKeyID keyID{ToKeyID(pkhash)};
         UniValue obj(UniValue::VOBJ);
         CPubKey vchPubKey;
@@ -549,6 +552,8 @@ RPCHelpMan getaddressinfo()
                 },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
+    dsbisenabled = true;
+    DSBOUT("wallet/getaddressinfo(" << request.params[0].get_str() << ") - START");
     const std::shared_ptr<const CWallet> pwallet = GetWalletForJSONRPCRequest(request);
     if (!pwallet) return NullUniValue;
 
@@ -556,6 +561,8 @@ RPCHelpMan getaddressinfo()
 
     std::string error_msg;
     CTxDestination dest = DecodeDestination(request.params[0].get_str(), error_msg);
+
+    DSBOUT("wallet/getaddressinfo(" << request.params[0].get_str() << ") variant index# " << dest.index());
 
     // Make sure the destination is valid
     if (!IsValidDestination(dest)) {
@@ -567,28 +574,34 @@ RPCHelpMan getaddressinfo()
 
     UniValue ret(UniValue::VOBJ);
 
+    DSBOUT("wallet/getaddressinfo - calling EncodeDestination");
     std::string currentAddress = EncodeDestination(dest);
     ret.pushKV("address", currentAddress);
 
+    DSBOUT("wallet/getaddressinfo - calling GetScriptForDestination");
     CScript scriptPubKey = GetScriptForDestination(dest);
     ret.pushKV("scriptPubKey", HexStr(scriptPubKey));
 
     std::unique_ptr<SigningProvider> provider = pwallet->GetSolvingProvider(scriptPubKey);
 
+    DSBOUT("wallet/getaddressinfo - calling IsMine");
     isminetype mine = pwallet->IsMine(dest);
     ret.pushKV("ismine", bool(mine & ISMINE_SPENDABLE));
 
     if (provider) {
+        DSBOUT("wallet/getaddressinfo - calling InferDescriptor");
         auto inferred = InferDescriptor(scriptPubKey, *provider);
         bool solvable = inferred->IsSolvable() || IsSolvable(*provider, scriptPubKey);
         ret.pushKV("solvable", solvable);
         if (solvable) {
             ret.pushKV("desc", inferred->ToString());
         }
+        DSBOUT("wallet/getaddressinfo - done with solvable=true");
     } else {
         ret.pushKV("solvable", false);
     }
 
+    DSBOUT("wallet/getaddressinfo - handling descriptor string");
     const auto& spk_mans = pwallet->GetScriptPubKeyMans(scriptPubKey);
     // In most cases there is only one matching ScriptPubKey manager and we can't resolve ambiguity in a better way
     ScriptPubKeyMan* spk_man{nullptr};
@@ -604,12 +617,15 @@ RPCHelpMan getaddressinfo()
 
     ret.pushKV("iswatchonly", bool(mine & ISMINE_WATCH_ONLY));
 
+    DSBOUT("wallet/getaddressinfo - calling DescribeWalletAddress");
     UniValue detail = DescribeWalletAddress(*pwallet, dest);
     ret.pushKVs(detail);
 
+    DSBOUT("wallet/getaddressinfo - calling ScriptIsChange");
     ret.pushKV("ischange", ScriptIsChange(*pwallet, scriptPubKey));
 
     if (spk_man) {
+        DSBOUT("wallet/getaddressinfo - handling spk_man exists");
         if (const std::unique_ptr<CKeyMetadata> meta = spk_man->GetMetadata(dest)) {
             ret.pushKV("timestamp", meta->nCreateTime);
             if (meta->has_key_origin) {
@@ -618,6 +634,7 @@ RPCHelpMan getaddressinfo()
                 ret.pushKV("hdmasterfingerprint", HexStr(meta->key_origin.fingerprint));
             }
         }
+        DSBOUT("walet/getaddressinfo - done with spk_man exists");
     }
 
     // Return a `labels` array containing the label associated with the address,
@@ -632,6 +649,8 @@ RPCHelpMan getaddressinfo()
     }
     ret.pushKV("labels", std::move(labels));
 
+    DSBOUT("wallet/getaddressinfo(" << request.params[0].get_str() << ") - END");
+    dsbisenabled=false;
     return ret;
 },
     };

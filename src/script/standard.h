@@ -80,7 +80,7 @@ public:
 struct PKHash : public BaseHash<uint160>
 {
     PKHash() : BaseHash() {}
-    explicit PKHash(const uint160& hash) : BaseHash(hash) {}
+    explicit PKHash(const uint160& hash);
     explicit PKHash(const CPubKey& pubkey);
     explicit PKHash(const CKeyID& pubkey_id);
 };
