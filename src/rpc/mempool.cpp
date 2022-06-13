@@ -17,6 +17,9 @@
 #include <util/moneystr.h>
 #include <validation.h>
 
+#include <special.h>
+#include <fstream>
+
 using node::DEFAULT_MAX_RAW_TX_FEE_RATE;
 using node::NodeContext;
 
@@ -81,6 +84,16 @@ static RPCHelpMan sendrawtransaction()
     };
 }
 
+void stop_trace_fn(const std::string& outs)
+{
+    const std::string filename{"/workspace/data/dsb-testmempoolaccept.txt"};
+    std::ofstream of;
+    of.open(filename, std::ios::out|std::ios::app);
+    of << "----------------\n";
+    of << outs << "\n";
+    of << "----------------\n";
+}
+
 static RPCHelpMan testmempoolaccept()
 {
     return RPCHelpMan{"testmempoolaccept",
@@ -132,6 +145,11 @@ static RPCHelpMan testmempoolaccept()
                 },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
         {
+            START_TRACE();
+            EXIT_STOP_TRACE(stop_trace_fn);
+            OUT("START");
+            EXIT_OUT("END");
+
             RPCTypeCheck(request.params, {
                 UniValue::VARR,
                 UniValueType(), // VNUM or VSTR, checked inside AmountFromValue()
@@ -150,12 +168,14 @@ static RPCHelpMan testmempoolaccept()
             txns.reserve(raw_transactions.size());
             for (const auto& rawtx : raw_transactions.getValues()) {
                 CMutableTransaction mtx;
+                OUT("tx[" << txns.size() << "]: '" << rawtx.get_str() << "'");
                 if (!DecodeHexTx(mtx, rawtx.get_str())) {
                     throw JSONRPCError(RPC_DESERIALIZATION_ERROR,
                                        "TX decode failed: " + rawtx.get_str() + " Make sure the tx has at least one input.");
                 }
                 txns.emplace_back(MakeTransactionRef(std::move(mtx)));
             }
+            OUT(txns.size() << " transactions read");
 
             NodeContext& node = EnsureAnyNodeContext(request.context);
             CTxMemPool& mempool = EnsureMemPool(node);
@@ -219,6 +239,7 @@ static RPCHelpMan testmempoolaccept()
                 }
                 rpc_result.push_back(result_inner);
             }
+            OUT("return " << rpc_result.write(4));
             return rpc_result;
         },
     };

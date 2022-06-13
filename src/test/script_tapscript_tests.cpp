@@ -5,6 +5,7 @@
 // TODO: Don't know whether Taproot/Tapscript tests should be exercising
 // `libconsensus` the way the tests in `script_tests` do
 
+#include <bech32.h>
 #include <core_io.h>
 #include <hash.h>
 #include <pubkey.h>
@@ -12,6 +13,7 @@
 #include <script/script.h>
 #include <script/script_error.h>
 #include <span.h>
+#include <streams.h>
 #include <test/util/boost_test_boosts.h>
 #include <test/util/pretty_data.h>
 #include <test/util/setup_common.h>
@@ -22,6 +24,8 @@
 
 #include <boost/test/execution_monitor.hpp>
 #include <boost/test/unit_test.hpp>
+
+/*TODO: REMOVE*/#include <special.h>
 
 #include <algorithm>
 #include <array>
@@ -106,10 +110,21 @@ union FillWithPattern {
 };
 
 /**
+ * Make a compressed key from raw byte vector.
+ */
+CKey make_ckey(const valtype& bv)
+{
+    CKey r;
+    r.Set(bv.begin(), bv.end(), /*compressed=*/true);
+    return r;
+}
+
+/**
  * The two possible actions for our mock signature checker
  */
 enum class CHECKER_VALIDATION { ALWAYS_SUCCEEDS,
-                                ALWAYS_FAILS };
+                                ALWAYS_FAILS,
+                                USE_REAL_CHECKER };
 
 /**
  * For these tests don't need _real_ signature/pubkey validation.  That is
@@ -144,6 +159,8 @@ public:
         case CHECKER_VALIDATION::ALWAYS_FAILS:
             if (serror) *serror = SCRIPT_ERR_SCHNORR_SIG;
             return false;
+        case CHECKER_VALIDATION::USE_REAL_CHECKER:
+            assert(false && "Mock is not real checker");
         }
         declare_unreachable();
     }
@@ -1173,12 +1190,12 @@ BOOST_AUTO_TEST_CASE(taproot_v1_verify_script)
 
     struct Context {
         // raw key data from `key_tests.cpp` @305
-        valtype m_sec{ParseHex("0000000000000000000000000000000000000000000000000000000000000003")};
-        valtype m_pub{ParseHex("F9308A019258C31049344F85F89D5229B531C845836F99B08601F113BCE036F9")};
-        valtype m_sig{ParseHex("E907831F80848D1069A5371B402410364BDF1C5F8307B0084C55F1CE2DCA821525F66A4A85EA8B71E482A74F382D2CE5EBEEE8FDB2172F477DF4900D310536C0")};
+        valtype m_sec{"0000000000000000000000000000000000000000000000000000000000000003"_hex};
+        valtype m_pub{"F9308A019258C31049344F85F89D5229B531C845836F99B08601F113BCE036F9"_hex};
+        valtype m_sig{"E907831F80848D1069A5371B402410364BDF1C5F8307B0084C55F1CE2DCA821525F66A4A85EA8B71E482A74F382D2CE5EBEEE8FDB2172F477DF4900D310536C0"_hex};
 
-        CKey m_sec_key;
-        XOnlyPubKey m_pub_key;
+        CKey m_sec_key = make_ckey(m_sec);
+        XOnlyPubKey m_pub_key{m_sec_key.GetPubKey()};
 
     private:
         void SetupKeys()
@@ -1186,10 +1203,6 @@ BOOST_AUTO_TEST_CASE(taproot_v1_verify_script)
             BOOST_TEST(m_sec.size() == 32);
             BOOST_TEST(m_pub.size() == 32);
             BOOST_TEST(m_sig.size() == 64);
-
-            m_sec_key.Set(m_sec.begin(), m_sec.end(), true /*compressed*/);
-            m_pub_key = XOnlyPubKey(m_sec_key.GetPubKey());
-
             BOOST_TEST(m_pub_key.IsFullyValid());
         }
 
@@ -1221,6 +1234,7 @@ BOOST_AUTO_TEST_CASE(taproot_v1_verify_script)
         valtype m_control_block_field;
         unsigned int m_flags = 0;
         CHECKER_VALIDATION m_checker_validation = CHECKER_VALIDATION::ALWAYS_FAILS;
+        std::unique_ptr<BaseSignatureChecker> m_checker_real;
 
         int64_t m_caller_line = 0;
         bool m_result = false;
@@ -1346,6 +1360,13 @@ BOOST_AUTO_TEST_CASE(taproot_v1_verify_script)
             return *this;
         }
 
+        Context& SetRealSchnorrSignatureValidation(std::unique_ptr<BaseSignatureChecker> checker)
+        {
+            m_checker_real = std::move(checker);
+            m_checker_validation = CHECKER_VALIDATION::USE_REAL_CHECKER;
+            return *this;
+        }
+
         Context& SetP2SHWrapped()
         {
             m_p2sh_wrapped = true;
@@ -1356,13 +1377,13 @@ BOOST_AUTO_TEST_CASE(taproot_v1_verify_script)
         {
             m_caller_line = line;
 
-            BOOST_TEST_MESSAGE(Descr() << "doing test");
+            BOOST_TEST_MESSAGE(Descr() << ": doing test");
 
             // Build control block
             bool have_control_block = m_control_block_init;
             valtype control_block(m_control_block);
             if (!have_control_block) {
-                BOOST_TEST_MESSAGE("maybe building control block");
+                BOOST_TEST_MESSAGE("maybe building control block, leaf version " << m_leaf_version);
                 if (m_leaf_version) {
                     BOOST_TEST_MESSAGE("have !=0 leaf version, definitely building control block");
                     have_control_block = true;
@@ -1376,36 +1397,49 @@ BOOST_AUTO_TEST_CASE(taproot_v1_verify_script)
             // build the witness if necessary
             if (!m_witness_init) {
                 if (have_control_block) {
+                    BOOST_TEST_MESSAGE("building witness, script path spend");
                     // Taproot script path spend
                     for (const auto& elem : m_initial_witness_stack)
                         m_witness.stack.push_back(elem);
                     m_witness.stack.push_back(valtype(m_tapscript.begin(), m_tapscript.end()));
                     m_witness.stack.push_back(control_block);
                 } else {
+                    BOOST_TEST_MESSAGE("building witness, key path spend");
                     // Taproot key path spend
                     if (!m_witness_signature.empty()) m_witness.stack.push_back(m_witness_signature);
                 }
-                if (!m_annex.empty()) m_witness.stack.push_back(m_annex);
+                if (!m_annex.empty()) {
+                    BOOST_TEST_MESSAGE("building witness, adding annex");
+                    m_witness.stack.push_back(m_annex);
+                }
+            } else {
+                BOOST_TEST_MESSAGE("no witness to build");
             }
 
             if (!m_flags) {
+                BOOST_TEST_MESSAGE("setting default flags");
                 m_flags = SCRIPT_VERIFY_SIGPUSHONLY | SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_TAPROOT;
             }
 
             SignatureCheckerMock checker_mock(m_checker_validation);
             CScript script_sig; // must be empty for actual Taproot
             if (m_p2sh_wrapped) {
+                BOOST_TEST_MESSAGE("preparing P2SH wrapped");
                 // But BIP-341 allows all SegWit v1 P2SH-wrapped outputs to pass
                 valtype fake_hash(20, 0x00);
                 script_sig << OP_0 << fake_hash;
             }
 
+            BOOST_TEST_MESSAGE("calling VerifyScript - real checker? " << std::boolalpha << !!m_checker_real);
             m_result = VerifyScript(script_sig,
                                     m_scriptPubKey,
                                     &m_witness,
                                     m_flags,
-                                    checker_mock,
+                                    m_checker_real ? *m_checker_real.get() : static_cast<const BaseSignatureChecker&>(checker_mock),
                                     &m_serror);
+            BOOST_TEST_MESSAGE("back from VerifyScript "
+                                << std::boolalpha << m_result
+                                << "," << FormatScriptError(m_serror).value_or("<SCRIPT ERROR UNKNOWN>"));
 
             m_checker_was_called = checker_mock.CheckerWasCalled();
 
@@ -1459,6 +1493,7 @@ BOOST_AUTO_TEST_CASE(taproot_v1_verify_script)
         }
     };
 
+#if 0
     {
         Context ctx("Valid Taproot v1 key path spend, hash_type == default, verifies");
         ctx.SetValidPublicKey()
@@ -1479,7 +1514,181 @@ BOOST_AUTO_TEST_CASE(taproot_v1_verify_script)
             .CheckCallSucceeded()
             .CheckSignatureCheckerWasCalled();
     }
+#endif
 
+    const CHashWriter HASHER_TAPSIGHASH = TaggedHash("TapSighash");
+    const CHashWriter HASHER_TAPLEAF = TaggedHash("TapLeaf");
+    const CHashWriter HASHER_TAPBRANCH = TaggedHash("TapBranch");
+    const CHashWriter HASHER_TAPTWEAK = TaggedHash("TapTweak");
+
+    // From https://github.com/bitcoin-core/btcdeb/blob/master/doc/tapscript-example-with-tap.md
+    const auto secret_alice_raw{"2bd806c97f0e00af1a1fc3328fa763a9269723c8db8fac4f93af71db186d6e90"_hex};
+    const auto public_alice_raw{"9997a497d964fc1a62885b05a51166a65a90df00492c8d7cf61d6accf54803be"_hex};
+    const auto secret_bob_raw{"81b637d8fcd2c6da6359e6963113a1170de795e4b725b84d1e0b4cfd9ec58ce9"_hex};
+    const auto public_bob_raw{"4edfcf9dfe6c0b5c83d1ab3f78d1b39a46ebac6798e08e19761f5ed89ec83c10"_hex};
+    const auto secret_internal_raw{"1229101a0fcf2104e8808dab35661134aa5903867d44deb73ce1c7e4eb925be8"_hex};
+    const auto public_internal_raw{"f30544d6009c8d8d94f5d030b2e844b1a3ca036255161c479db1cca5b374dd1c"_hex};
+    const auto preimage_raw{"107661134f21fc7c02223d50ab9eb3600bc3ffc3712423a1e47bb1f9a9dbf55f"_hex};
+    const auto preimage_sha{"6c60f404f8167a38fc70eaf8aa17ac351023bef86bcb9d1086a19afe95bd5333"_hex};
+
+    BOOST_TEST(public_internal_raw.size() == 32);
+
+    const XOnlyPubKey public_internal_xonly{public_internal_raw};
+    BOOST_TEST(public_internal_xonly.IsFullyValid());
+
+    auto script_alice_raw{"029000b275209997a497d964fc1a62885b05a51166a65a90df00492c8d7cf61d6accf54803beac"_hex};
+    auto script_bob_raw{"a8206c60f404f8167a38fc70eaf8aa17ac351023bef86bcb9d1086a19afe95bd533388204edfcf9dfe6c0b5c83d1ab3f78d1b39a46ebac6798e08e19761f5ed89ec83c10ac"_hex};
+
+    CScript script_alice; script_alice << 144 << OP_CHECKSEQUENCEVERIFY << OP_DROP << public_alice_raw << OP_CHECKSIG;
+    CScript script_bob;   script_bob << OP_SHA256 << preimage_sha << OP_EQUALVERIFY << public_bob_raw << OP_CHECKSIG;
+
+    BOOST_TEST(Span(script_alice) == Span(script_alice_raw));
+    BOOST_TEST(Span(script_bob) == Span(script_bob_raw));
+
+    const auto tree_alice_leafhash_raw{"c81451874bd9ebd4b6fd4bba1f84cdfb533c532365d22a0a702205ff658b17c9"_hex};
+    const auto tree_bob_leafhash_raw{"632c8632b4f29c6291416e23135cf78ecb82e525788ea5ed6483e3c6ce943b42"_hex};
+    const auto tree_alice_bob_branchhash_raw{"41646f8c1fe2a96ddad7f5471bc4fee7da98794ef8c45a4f4fc6a559d60c9f6b"_hex};
+    const auto tree_taptweak_raw{"620fc4000ba539753ffa0e5893b4243cb1cf0a258cf8a09a9038f5f1352607a9"_hex};
+    const std::string send_to_address_raw("bcrt1p5kaqsuted66fldx256lh3en4h9z4uttxuagkwepqlqup6hw639gsm28t6c");
+    const unsigned char leaf_version{0xc0};
+    const auto tree_alice_leafhash{(CHashWriter(HASHER_TAPLEAF) << leaf_version << script_alice).GetSHA256()};
+    const auto tree_bob_leafhash{(CHashWriter(HASHER_TAPLEAF) << leaf_version << script_bob).GetSHA256()};
+
+    const auto tree_alice_bob_branchhash{(CHashWriter(HASHER_TAPBRANCH)
+                                     << (std::lexicographical_compare(tree_alice_leafhash.begin(), tree_alice_leafhash.end(),
+                                                                      tree_bob_leafhash.begin(), tree_bob_leafhash.end()) ? tree_alice_leafhash : tree_bob_leafhash)
+                                     << (std::lexicographical_compare(tree_alice_leafhash.begin(), tree_alice_leafhash.end(),
+                                                                     tree_bob_leafhash.begin(), tree_bob_leafhash.end()) ? tree_bob_leafhash : tree_alice_leafhash))
+                                    .GetSHA256()};
+
+    const auto tree_taptweak{(CHashWriter(HASHER_TAPTWEAK) << public_internal_raw << tree_alice_bob_branchhash).GetSHA256()};  // << THIS DOES NOT WORK!!!!!
+    // ^^^ AND I CAN'T FIGURE OUT WHY IT DOESN'T WORK.
+    //     Compare to (pubkey.cpp) XOnlyPubKey::ComputeTapTweakhash
+    //     DUMP SOME VALUES OVER THERE!
+
+    BOOST_TEST(Span(tree_alice_leafhash) == Span(tree_alice_leafhash_raw));
+    BOOST_TEST(Span(tree_bob_leafhash) == Span(tree_bob_leafhash_raw));
+    BOOST_TEST(Span(tree_alice_bob_branchhash) == Span(tree_alice_bob_branchhash_raw));
+    BOOST_TEST(Span(tree_taptweak) == Span(tree_taptweak_raw));
+
+    BOOST_TEST_MESSAGE("tree_alice_bob_branchhash               " << tree_alice_bob_branchhash);
+    BOOST_TEST_MESSAGE("tree_alice_bob_branchhash via HexStr    " << HexStr(tree_alice_bob_branchhash));
+    BOOST_TEST_MESSAGE("tree_alice_bob_branchhash via GetHex    " << tree_alice_bob_branchhash.GetHex());
+    BOOST_TEST_MESSAGE("tree_alice_bob_branchhash via begin/end " << HexStr(Span(tree_alice_bob_branchhash.begin(), tree_alice_bob_branchhash.end())));
+
+    BOOST_TEST_MESSAGE("tree_taptweak_raw           " << HexStr(tree_taptweak_raw));
+    BOOST_TEST_MESSAGE("tree_taptweak               " << tree_taptweak);
+
+    const auto taptweak_hash{public_internal_xonly.ComputeTapTweakHash(&tree_alice_bob_branchhash)}; // << THIS WORKS
+    BOOST_TEST_MESSAGE("taptweak_hash               " << taptweak_hash);
+    BOOST_TEST_MESSAGE("taptweak_hash via HexStr    " << HexStr(taptweak_hash));
+    BOOST_TEST_MESSAGE("taptweak_hash via GetHex    " << taptweak_hash.GetHex());
+    BOOST_TEST_MESSAGE("taptweak_hash via begin/end " << HexStr(Span(taptweak_hash.begin(), taptweak_hash.end())));
+
+    const auto taptweak{public_internal_xonly.CreateTapTweak(&tree_alice_bob_branchhash)}; // << THIS WORKS
+    BOOST_TEST(taptweak.has_value());
+    BOOST_TEST_MESSAGE("taptweak                    " << HexStr(Span(taptweak.value().first)) << " " << taptweak.value().second);
+
+    valtype tt_bytes(taptweak.value().first.begin(), taptweak.value().first.end());
+    valtype tt_base32;
+    tt_base32.reserve(100);
+    tt_base32.push_back(1); /* witness version */
+    ConvertBits<8, 5, /*pad=*/true>([&](int v) { tt_base32.push_back(v); }, tt_bytes.begin(), tt_bytes.end());
+    const auto send_to_addr = bech32::Encode(bech32::Encoding::BECH32M, "bcrt", tt_base32);
+    BOOST_TEST_MESSAGE("send-to-address_raw " << send_to_address_raw);
+    BOOST_TEST_MESSAGE("send-to-address     " << send_to_addr);
+
+    CScript send_witness; send_witness << OP_1 << tt_bytes;
+
+    CMutableTransaction txin_m{BuildCreditingTransaction(/*scriptPubKey=*/send_witness, /*amount=*/1'000'000)};
+    CTransaction txin{txin_m};
+    auto txin_hash{txin.GetHash()};
+    auto txin_witness_hash{txin.GetWitnessHash()};
+    int txin_vout{0};
+    std::string txin_hex{};
+    BOOST_TEST_MESSAGE("txin hash " << HexStr(Span(txin_hash))
+                    << " has witness? " << std::boolalpha << txin.HasWitness()
+                    << " witness hash " << HexStr(Span(txin_witness_hash))
+                    << " value: " << txin.ToString());
+
+    const int tx_amount_sent{5'000'000};
+    const auto tx_id{"0999f9b2b6cea9b9913bfa3f78f672f092676d84e721fd7601a2602049450fbd"_hex};
+    const auto tx_hash{"eac5e07fc2df92d8ae66a4414d912468364b303dfaf4e14f9c9e7c71510eeff6"_hex};
+    const auto tx_raw{"020000000001018bcf546f862bc1700209904b56e6b3924353515b20a52348110015b2a7e356fd0000000000feffffff0220a1070000000000225120a5ba0871796eb49fb4caa6bf78e675b9455e2d66e751676420f8381d5dda89513b50fe290100000022512072b8fcb403c735da9c502fa589ff1e163146e6b003d4699811cceeeaeee70091024730440220581091314afc0ea13d0afa46493a25453c25de904f47ddee866e1105a0b283dd0220245715081ac02818e9bdb3d106c05830e6dfec2e8a61480cdf3b4400c2d1e98a012103bdc13ca707235db1e328be658eda4b524f8074288a17888690eb2f000c3beb8568000000"_hex};
+    const int tx_vout{0};
+    CMutableTransaction tx_m;
+    SpanReader{SER_NETWORK, PROTOCOL_VERSION, tx_raw} >> tx_m;
+    CTransaction tx{tx_m};
+    BOOST_TEST_MESSAGE("tx (myexample): " << tx.ToString());
+
+    const int tx_ex_amount_sent{1'000'000};
+    const auto tx_ex_id{"ec409014a3b1e7171cf498726bc7bc8bd249a04b65f30c7b8cb5c3079cf8f271"_hex};
+    const auto tx_ex_hash{"c2c9b5d2b122e0765ca4200c58a2c0bb2d87da17c4299b41aa03f4ee650e06e4"_hex};
+    const auto tx_ex_raw{"020000000001010aa633878f200c80fc8ec88f13f746e5870be7373ad5d78d22e14a402d6c6fc20000000000feffffff02a086010000000000225120a5ba0871796eb49fb4caa6bf78e675b9455e2d66e751676420f8381d5dda8951c759f405000000001600147bf84e78c81b9fed7a47b9251d95b13d6ebac14102473044022017de23798d7a01946744421fbb79a48556da809a9ffdb729f6e5983051480991022052460a5082749422804ad2a25e6f8335d5cf31f69799cece4a1ccc0256d5010701210257e0052b0ec6736ee13392940b7932571ce91659f71e899210b8daaf6f17027500000000"_hex};
+    const int tx_ex_vin{0};
+    const int tx_ex_vout{0};
+    CMutableTransaction tx_ex_m;
+    SpanReader{SER_NETWORK, PROTOCOL_VERSION, tx_ex_raw} >> tx_ex_m;
+    CTransaction tx_ex{tx_ex_m};
+    BOOST_TEST_MESSAGE("tx_ex (exmample) has witness? " << std::boolalpha << tx_ex.HasWitness() << " witness hash " << HexStr(Span(tx_ex.GetWitnessHash())));
+    BOOST_TEST_MESSAGE("tx_ex (example): " << tx_ex.ToString());
+    CScriptWitness tx_ex_script_witness{tx_ex.vin[tx_ex_vin].scriptWitness};
+    BOOST_TEST_MESSAGE("tx_ex (example) witness stack [" << tx_ex_script_witness.stack.size() << "]"
+                                << " " << tx_ex_script_witness.ToString());
+
+    const auto spend_tx_ex_amount_sent{100000};
+    const auto spend_tx_ex_sighash_little_endian{"28e88d197adeaf164a96b68965907ded7e41d6945ee720b1480724499fdf102d"_hex};
+    const auto spend_tx_ex_sighash_big_endian{"28e88d197adeaf164a96b68965907ded7e41d6945ee720b1480724499fdf102d"_hex};
+    const auto spend_tx_ex_secret_internal_raw{"4fe6b3e5fbd61870577980ad5e4e13080776069f0fb3c1e353572e0c4993abc1"_hex};
+    const auto spend_tx_ex_public_internal_raw{"a5ba0871796eb49fb4caa6bf78e675b9455e2d66e751676420f8381d5dda8951"_hex};
+    const auto spend_tx_ex_signature_raw{"742c016b800a80daa3fbc744642189b838e858ea4b63461ec23751457cd2f8d6a9e304e069d07bc60fc351dff7e5599b11309731b4dc5eea4f5fd6560dec0be2"_hex};
+    const auto spend_tx_ex_raw{"0200000000010171f2f89c07c3b58c7b0cf3654ba049d28bbcc76b7298f41c17e7b1a3149040ec0000000000ffffffff01905f010000000000160014ceb2d28afdcad1ae0fc2cf81cb929ba29e8346820140742c016b800a80daa3fbc744642189b838e858ea4b63461ec23751457cd2f8d6a9e304e069d07bc60fc351dff7e5599b11309731b4dc5eea4f5fd6560dec0be200000000"_hex};
+    const auto spend_tx_ex_vin{0};
+    const auto spend_tx_ex_vout{0};
+    CMutableTransaction spend_tx_ex_m;
+    SpanReader{SER_NETWORK, PROTOCOL_VERSION, spend_tx_ex_raw} >> spend_tx_ex_m;
+    CTransaction spend_tx_ex{spend_tx_ex_m};
+    BOOST_TEST_MESSAGE("spend_tx_ex (exmample) has witness? " << std::boolalpha << spend_tx_ex.HasWitness() << " witness hash " << HexStr(Span(spend_tx_ex.GetWitnessHash())));
+    BOOST_TEST_MESSAGE("spend_tx_ex (example): " << spend_tx_ex.ToString());
+    CScriptWitness spend_tx_ex_script_witness{spend_tx_ex.vin[spend_tx_ex_vin].scriptWitness};
+    BOOST_TEST_MESSAGE("spend_tx_ex (example) witness stack [" << spend_tx_ex_script_witness.stack.size() << "]"
+                                << " " << spend_tx_ex_script_witness.ToString());
+
+
+    START_TRACE()
+    {
+        // Context ctx("Valid Taproot v1 script path spend, not tapscript, with a tree with two alternatives, using internal private key to sign");
+        // ctx.SetPublicKey(public_internal_raw)
+        //    .SetWitness(tx_ex_script_witness.stack)
+        //    .DoTest(__LINE__)
+        //    .CheckCallSucceeded()
+        //    .CheckSignatureCheckerWasCalled();
+        // // FAILS: witness program mismatch (VerifyTaprootCommitment fails)
+
+        CAmount amount_in{100'000};
+        std::vector<CTxOut> txOuts;
+        txOuts.push_back(tx_ex.vout[tx_ex_vout]);
+        PrecomputedTransactionData txDataIn;
+        txDataIn.Init(spend_tx_ex, std::vector<CTxOut>(txOuts));
+        std::unique_ptr<BaseSignatureChecker> checker =
+                std::make_unique<TransactionSignatureChecker>(/*txToIn=*/&spend_tx_ex,
+                                                              /*nInIn=*/0,
+                                                              /*amountIn=*/amount_in,
+                                                              /*txDataIn=*/txDataIn,
+                                                              MissingDataBehavior::FAIL);
+        Context ctx("Valid Taproot v1 script path spend, with a tree with two alternatives, using internal private key to sign");
+        ctx.SetPublicKey(public_internal_raw/*spend_tx_ex_public_internal_raw*/)
+           .SetWitness(spend_tx_ex_script_witness.stack)
+           .SetRealSchnorrSignatureValidation(std::move(checker))
+           .DoTest(__LINE__)
+           .CheckCallSucceeded();
+    }
+    BOOST_TEST_MESSAGE("inner trace:\n" << GET_OUT());
+    STOP_TRACE();
+
+
+
+#if 0
     {
         // Taproot v1 but witness program (scriptPubKey push) is NOT 32 bytes exactly: anything goes.
         // Witness programs size ∈ [2,40], per BIP-141
@@ -1577,6 +1786,7 @@ BOOST_AUTO_TEST_CASE(taproot_v1_verify_script)
             .CheckCallSucceeded()
             .CheckSignatureCheckerWasNotCalled();
     }
+#endif
 }
 
 ///////////////////////////////////////////////

@@ -236,6 +236,7 @@ BITCOIN_CORE_H = \
   script/standard.h \
   shutdown.h \
   signet.h \
+	special.h \
   streams.h \
   support/allocators/secure.h \
   support/allocators/zeroafterfree.h \
@@ -587,6 +588,7 @@ libbitcoin_consensus_a_SOURCES = \
   script/script_error.h \
   serialize.h \
   span.h \
+	special.h special.cpp \
   tinyformat.h \
   uint256.cpp \
   uint256.h \
@@ -649,6 +651,7 @@ libbitcoin_util_a_SOURCES = \
   randomenv.cpp \
   rpc/request.cpp \
   support/cleanse.cpp \
+	special.cpp \
   sync.cpp \
   threadinterrupt.cpp \
   util/asmap.cpp \

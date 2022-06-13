@@ -1,0 +1,144 @@
+#include <strstream>
+
+namespace { // anon
+
+std::string to_string(const CScript& cs)
+{
+    return HexStr(ToByteVector(cs));
+}
+
+std::string to_string_fmtd(const CScript& cs)
+{
+    std::string s{"CScript("};
+    s += FormatScript(cs);
+    s += ")";
+    return s;
+}
+
+std::string to_string(const CScriptWitness& csw)
+{
+    return csw.ToString();
+}
+
+std::string to_string(const CTxIn& txi)
+{
+    // May be insufficient
+    return txi.ToString();
+}
+
+std::string to_string(const CTxOut& txo)
+{
+    // May be insufficient
+    return txo.ToString();
+}
+
+std::string to_string(const CTransaction& tx)
+{
+    // May be insufficient
+    return tx.ToString();
+}
+
+std::string to_string(const PrecomputedTransactionData& ptd)
+{
+    std::ostringstream oss;
+    oss << "{ ";
+
+    if (ptd.m_bip341_taproot_ready) {
+        oss << "bip341_taproot_ready, single hash { prevouts " << ptd.m_prevouts_single_hash.ToString();
+        oss << " sequences " << ptd.m_sequences_single_hash.ToString();
+        oss << " outputs " << ptd.m_outputs_single_hash.ToString();
+        oss << " spent_amounts " << ptd.m_spent_amounts_single_hash.ToString();
+        oss << " spent_scripts " << ptd.m_spent_scripts_single_hash.ToString();
+        oss << " }";
+    } else {
+        oss << "not bip341_taproot_ready";
+    }
+
+    oss << "; ";
+    if (ptd.m_bip143_segwit_ready) {
+        oss << "bip143_segwit_ready, hash { prevouts " << ptd.hashPrevouts.ToString();
+        oss << " sequence " << ptd.hashSequence.ToString();
+        oss << " outputs " << ptd.hashOutputs.ToString();
+        oss << " }";
+    } else {
+        oss << "not bip143_segwit_ready";
+    }
+
+    oss << "; ";
+    if (ptd.m_spent_outputs_ready) {
+        oss << "spent_outputs_ready (" << ptd.m_spent_outputs.size() << ")[";
+        for (const auto& txo : ptd.m_spent_outputs) {
+            oss << " " << to_string(txo);
+        }
+        oss << " ]";
+    } else {
+        oss << "not spent_outputs_ready";
+    }
+
+    oss << " }";
+    return oss.str();
+}
+
+std::string to_string(const ScriptExecutionData& sed)
+{
+    std::ostringstream oss;
+    oss << "{ ";
+
+    // TODO: Might have endian issue with uint256::ToString() here (and below at annex_hash)
+    oss << "tapleaf hash? ";
+    if (sed.m_tapleaf_hash_init)
+        oss << "yes, " << sed.m_tapleaf_hash.ToString();
+    else
+        oss << "no";
+
+    oss << "; codeseparator_pos_init? ";
+    if (sed.m_codeseparator_pos_init)
+        oss << "yes, " << sed.m_codeseparator_pos;
+    else
+        oss << "no";
+
+    oss << "; annex init? ";
+    if (sed.m_annex_init) {
+        if (sed.m_annex_present)
+            oss << " yes, present, " << sed.m_annex_hash.ToString();
+        else
+            oss << " yes, not present";
+    } else
+        oss << "no";
+
+    oss << "; validation weight left? ";
+    if (sed.m_validation_weight_left_init)
+        oss << " yes, " << sed.m_validation_weight_left;
+    else
+        oss << " no";
+
+    oss << " }";
+    return oss.str();
+}
+
+std::string to_string(const Span<const unsigned char>& bv)
+{
+    return HexStr(bv);
+}
+
+std::string to_string(ScriptError_t serr)
+{
+    return dsb::FormatScriptError(serr);
+}
+
+std::string to_string(SigVersion v)
+{
+    switch (v) {
+        case SigVersion::BASE: return "BASE";
+        case SigVersion::WITNESS_V0: return "WITNESS_V0";
+        case SigVersion::TAPROOT: return "TAPROOT";
+        case SigVersion::TAPSCRIPT: return "TAPSCRIPT";
+    };
+}
+
+std::string to_string_flags(unsigned int f)
+{
+    return dsb::FormatScriptFlags(f);
+}
+
+} // namespace

@@ -16,6 +16,9 @@
 #include <algorithm>
 #include <cassert>
 
+#include <special.h>
+#include <test/util/pretty_data.h>
+
 namespace
 {
 /* Global secp256k1_context object used for verification. */
@@ -203,12 +206,32 @@ bool XOnlyPubKey::IsFullyValid() const
     return secp256k1_xonly_pubkey_parse(secp256k1_context_verify, &pubkey, m_keydata.data());
 }
 
+namespace {
+std::string to_string(const Span<const unsigned char>& bv)
+{
+    return HexStr(bv);
+}
+
+}
+
 bool XOnlyPubKey::VerifySchnorr(const uint256& msg, Span<const unsigned char> sigbytes) const
 {
+    OUT("START - msg " << to_string(Span(msg)) << " sigbytes [" << sigbytes.size() << "] " << to_string(sigbytes));
+    EXIT_OUT("END");
+
     assert(sigbytes.size() == 64);
     secp256k1_xonly_pubkey pubkey;
-    if (!secp256k1_xonly_pubkey_parse(secp256k1_context_verify, &pubkey, m_keydata.data())) return false;
-    return secp256k1_schnorrsig_verify(secp256k1_context_verify, sigbytes.data(), msg.begin(), 32, &pubkey);
+    if (!secp256k1_xonly_pubkey_parse(secp256k1_context_verify, &pubkey, m_keydata.data())) {
+        OUT("error exit - secp256k1_xonly_pubkey_parse failed");
+        return false;
+    }
+    bool r = secp256k1_schnorrsig_verify(secp256k1_context_verify, sigbytes.data(), msg.begin(), 32, &pubkey);
+    if (r) {
+        OUT("success exit - secp256k1_schnorrsig_verify returned true");
+    } else {
+        OUT("error exit - secp256k1_schnorrsig_verify returned false");
+    }
+    return r;
 }
 
 static const CHashWriter HASHER_TAPTWEAK = TaggedHash("TapTweak");

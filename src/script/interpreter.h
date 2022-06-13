@@ -263,6 +263,11 @@ public:
          return false;
     }
 
+    virtual std::string ToString() const
+    {
+        return typeid(*this).name();
+    }
+
     virtual ~BaseSignatureChecker() {}
 };
 

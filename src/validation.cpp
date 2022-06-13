@@ -52,6 +52,10 @@
 #include <validationinterface.h>
 #include <warnings.h>
 
+/*DSB*/#include <special.h>
+/*DSB*/#include <core_io.h>
+/*DSB*/#include <script/to-string.h.in>
+
 #include <algorithm>
 #include <deque>
 #include <numeric>
@@ -1657,6 +1661,18 @@ void UpdateCoins(const CTransaction& tx, CCoinsViewCache& inputs, CTxUndo &txund
 bool CScriptCheck::operator()() {
     const CScript &scriptSig = ptxTo->vin[nIn].scriptSig;
     const CScriptWitness *witness = &ptxTo->vin[nIn].scriptWitness;
+
+    {
+        OUT("scriptSig " << to_string(scriptSig)
+        << " tx_out.scriptPubKey " << to_string(m_tx_out.scriptPubKey)
+        << " witness " << (witness ? to_string(*witness) : "<NONE>")
+        << " nFlags " << nFlags
+        << " txTo " << (ptxTo ? to_string(*ptxTo) : "<NONE>")
+        << " nIn " << nIn
+        << " m_tx_out.nValue " << m_tx_out.nValue
+        << " txdata " << (txdata ? to_string(*txdata) : "<NONE>"));
+    }
+
     return VerifyScript(scriptSig, m_tx_out.scriptPubKey, witness, nFlags, CachingTransactionSignatureChecker(ptxTo, nIn, m_tx_out.nValue, cacheStore, *txdata), &error);
 }
 
