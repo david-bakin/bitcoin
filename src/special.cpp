@@ -3,7 +3,9 @@
 #include <policy/policy.h>
 #include <script/script_error.h>
 
+#include <algorithm>
 #include <experimental/source_location>
+#include <iomanip>
 #include <map>
 #include <memory>
 #include <sstream>
@@ -11,17 +13,132 @@
 #include <string_view>
 #include <utility>
 
+#include <cxxabi.h>   // for __cxa_demangle
 #include <execinfo.h> // for backtrace(3)
+#include <elfutils/libdwfl.h>
+#include <unistd.h>   // for gitpid(2)
 
 using namespace std::string_view_literals;
 
+#define XSTr(s) STr(s)
+#define STr(s) #s
+
 namespace dsb {
+
+static char const * const WORKSPACE_PATHS_RAW = R"(
+src
+src/.libs
+src/common
+src/compat
+src/consensus
+src/consensus/.libs
+src/crc32c/src
+src/crypto
+src/crypto/.libs
+src/index
+src/init
+src/interfaces
+src/kernel
+src/leveldb/db
+src/leveldb/helpers/memenv
+src/leveldb/table
+src/leveldb/util
+src/minisketch/src
+src/minisketch/src/fields
+src/node
+src/policy
+src/primitives
+src/primitives/.libs
+src/rpc
+src/script
+src/script/.libs
+src/secp256k1/src
+src/support
+src/support/.libs
+src/test
+src/test/util
+src/univalue/lib
+src/univalue/lib/.libs
+src/univalue/test
+src/util
+src/util/.libs
+src/wallet
+src/wallet/rpc
+src/wallet/test
+src/zmq
+.debug
+/usr/lib/debug)";
+
+std::string pathify(std::string_view sv)
+{
+    std::string r{sv};
+    std::transform(r.begin(), r.end(), r.begin(), [](char c){ return c == '\n' ? ':' : c; });
+    return r;
+}
+
+static std::string WORKSPACE_PATHS{pathify(WORKSPACE_PATHS_RAW)};
+static char* debug_info_path = WORKSPACE_PATHS.data();
+
+std::unique_ptr<::Dwfl, decltype(&::dwfl_end)> open_dwfl()
+{
+
+    static ::Dwfl_Callbacks callbacks{};
+    callbacks.debuginfo_path = &debug_info_path;
+    callbacks.find_debuginfo = ::dwfl_standard_find_debuginfo;
+    callbacks.find_elf = ::dwfl_linux_proc_find_elf;
+    callbacks.section_address = ::dwfl_offline_section_address; // ??, or maybe dwfl_linux_kernel_module_section_address ?
+
+    return std::unique_ptr<::Dwfl, decltype(&::dwfl_end)>(::dwfl_begin(&callbacks), ::dwfl_end);
+}
 
 std::unique_ptr<std::ostringstream> poss;
 
+static constexpr auto barrier = "―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――";
+
+void emit_general_information()
+{
+    std::string pic_value{"__PIC__ = "};
+#if defined(__PIC__)
+    pic_value += XSTr(__PIC__);
+#else
+    pic_value += "undefined";
+#endif
+    std::string pie_value{"__PIE__ = "};
+#if defined(__PIE__)
+    pie_value += XSTr(__PIE__);
+#else
+    pie_value += "undefined";
+#endif
+
+    std::string dwfl_version_str{};
+    {
+        auto session{open_dwfl()};
+        if (session) {
+            dwfl_version_str = dwfl_version(session.get());
+        } else {
+            dwfl_version_str = "<LIBDWFL DID NOT INITIALIZE>";
+        }
+    }
+
+    *poss << "libdwfl version " << dwfl_version_str << ", " << pic_value << ", " << pie_value
+         << " debug info path " << WORKSPACE_PATHS << "\n\n";
+}
+
+
+#undef STr
+#undef XSTr
+
 bool is_enabled() { return (bool)poss; }
 
-void set_enabled(bool b) { poss = b ? std::make_unique<std::ostringstream>() : nullptr; }
+void set_enabled(bool b)
+{
+    if (poss && !b) *poss << barrier << '\n' << '\n';
+    poss = b ? std::make_unique<std::ostringstream>() : nullptr;
+    if (b) {
+        *poss << '\n' << barrier << '\n' << '\n';
+        emit_general_information();
+    }
+}
 
 std::ostream& oss() { return *poss.get(); }
 
@@ -30,6 +147,14 @@ std::string oss_contents() { return poss->str(); }
 std::ostream& out_to(std::ostream& os, const srcloc loc)
 {
     return os << loc.function_name() << "@(" << loc.line() << "): ";
+}
+
+std::ostream& wrap_trace(std::ostream& os, size_t indent)
+{
+    static constexpr auto blanks{"                                                                                                                               "};
+    os << '\n';
+    os << std::string_view(blanks, indent);
+    return os;
 }
 
 const std::map<std::string_view, unsigned int> mapFlagNames = {
@@ -160,9 +285,103 @@ std::string FormatScriptError(ScriptError_t err)
     return "<SCRIPT_ERROR_UNKNOWN>";
 }
 
+std::string diy_stacktrace()
+{
+    // stack trace via `backtrace(3)`, name demangling via `libdwfl`, by
+    // [Ciro Santilli (Путлер Капут) (六四事) answer on how to do a stacktrace, with symbols, Linux, C++, demangled w/o Boost](https://stackoverflow.com/a/54365144/751579)
+
+    auto no_trace = [](const std::string_view sv)
+    {
+        std::string r{"<NO STACKTRACE AVAILABLE - "};
+        r += sv;
+        r += ">";
+        return r;
+    };
+
+    auto session{open_dwfl()};
+    if (!session) return no_trace("couldn't open dwfl session");
+
+    int r = ::dwfl_linux_proc_report(session.get(), ::getpid());
+    if (r) {
+        std::string errstr = "a call to dwfl_report_module failed (-1)";
+        if (-1 != r) {
+            auto err = ::dwfl_errno();
+            std::ostringstream oss;
+            oss << "opening proc files failed - " << ::dwfl_errmsg(err) << " (" << err << ')';
+            errstr = oss.str();
+        }
+        errstr.replace(0, 0, "::dwfl_linux_proc_report_failed - ");
+        return no_trace(errstr);
+    }
+
+    r = ::dwfl_report_end(session.get(), nullptr, nullptr);
+    if (r) {
+        return no_trace("::dwfl_report_end failed");
+    }
+
+    // get the stack trace itself
+
+    auto debug_info = [&session](void* ip) -> std::string {
+        auto demangle = [](std::string_view name) -> std::string {
+            int status{-4};
+            std::unique_ptr<char, decltype(&std::free)> res{
+                abi::__cxa_demangle(name.data(), nullptr, nullptr, &status),
+                std::free
+            };
+            if (!status) return res.get();
+            // TODO: Report error code here! (might be interesting)
+            return std::string(name);
+        };
+
+        uintptr_t ip2 = reinterpret_cast<uintptr_t>(ip);
+        ::Dwfl_Module* module{::dwfl_addrmodule(session.get(), ip2)};
+        char const* name{::dwfl_module_addrname(module, ip2)};
+        std::string function{name ? demangle(name) : "<unknown-fn>"};
+        int line{-1};
+        std::string file{};
+        if (::Dwfl_Line* dwfl_line = ::dwfl_module_getsrc(module, ip2)) {
+            ::Dwarf_Addr addr;
+            file = ::dwfl_lineinfo(dwfl_line, &addr, &line, nullptr, nullptr, nullptr);
+            if (file.empty()) {
+                auto err = ::dwfl_errno();
+                std::ostringstream oss;
+                oss << "dwfl_lineinfo failed - " << ::dwfl_errmsg(err) << " (" << err << ')';
+                file = oss.str();
+            }
+        } else {
+            auto err = ::dwfl_errno();
+            std::ostringstream oss;
+            oss << "dwfl_module_getsrc failed - " << ::dwfl_errmsg(err) << " (" << err << ')';
+            file = oss.str();
+        }
+
+        {
+            std::ostringstream oss;
+            oss << std::setw(8) << std::setfill('0') << std::internal << ip << ' ' << function;
+            if (!file.empty()) oss << " at " << file << ':' << line;
+            oss << '\n';
+            return oss.str();
+        }
+    };
+
+    static constexpr size_t FRAMES_TO_SKIP_AT_TOS = 4;
+    static constexpr size_t BT_BUF_SIZE = 250;
+    void* stack[BT_BUF_SIZE];
+    int nptrs = ::backtrace(stack, BT_BUF_SIZE);
+    std::ostringstream oss;
+    for (int i = FRAMES_TO_SKIP_AT_TOS; i < nptrs; ++i) {
+        oss << (i - FRAMES_TO_SKIP_AT_TOS) << ": ";
+        oss << debug_info(stack[i]);
+    }
+
+    return oss.str();
+}
 
 std::string stacktrace()
 {
+    return diy_stacktrace();
+
+#if 0
     // From example of `backtrace(3)` man page
     static constexpr size_t BT_BUF_SIZE = 200;
 
@@ -173,16 +392,16 @@ std::string stacktrace()
     nptrs = ::backtrace(buffer, BT_BUF_SIZE);
     strings = ::backtrace_symbols(buffer, nptrs);
     if (strings) {
-        std::string r;
+        std::ostringstream oss;
         for (int i = 0; i < nptrs; i++) {
-            r += strings[i];
-            r += '\n';
+            oss << strings[i] << '\n';
         }
         ::free(strings);
-        return r;
+        return oss.str();
     } else {
         return "<NO-STACKDUMP-AVAILABLE>";
     }
+#endif
 }
 
 } // namespace
